@@ -887,13 +887,14 @@ class VideoInfo:
 
     CATEGORY = "Video Helper Suite 🎥🅥🅗🅢"
 
-    RETURN_TYPES = ("FLOAT","INT", "FLOAT", "INT", "INT", "FLOAT","INT", "FLOAT", "INT", "INT")
+    RETURN_TYPES = ("FLOAT","INT", "FLOAT", "INT", "INT", "STRING", "FLOAT","INT", "FLOAT", "INT", "INT")
     RETURN_NAMES = (
         "source_fps🟨",
         "source_frame_count🟨",
         "source_duration🟨",
         "source_width🟨",
         "source_height🟨",
+        "source_filename🟨",
         "loaded_fps🟦",
         "loaded_frame_count🟦",
         "loaded_duration🟦",
@@ -912,7 +913,7 @@ class VideoInfo:
             source_info.append(video_info[f"source_{key}"])
             loaded_info.append(video_info[f"loaded_{key}"])
 
-        return (*source_info, *loaded_info)
+        return (*source_info, video_info["source_filename"], *loaded_info)
 
 
 class VideoInfoSource:
@@ -926,13 +927,14 @@ class VideoInfoSource:
 
     CATEGORY = "Video Helper Suite 🎥🅥🅗🅢"
 
-    RETURN_TYPES = ("FLOAT","INT", "FLOAT", "INT", "INT",)
+    RETURN_TYPES = ("FLOAT","INT", "FLOAT", "INT", "INT", "STRING",)
     RETURN_NAMES = (
         "fps🟨",
         "frame_count🟨",
         "duration🟨",
         "width🟨",
         "height🟨",
+        "filename🟨",
     )
     FUNCTION = "get_video_info"
 
@@ -944,7 +946,7 @@ class VideoInfoSource:
         for key in keys:
             source_info.append(video_info[f"source_{key}"])
 
-        return (*source_info,)
+        return (*source_info, video_info["source_filename"])
 
 
 class VideoInfoLoaded:
