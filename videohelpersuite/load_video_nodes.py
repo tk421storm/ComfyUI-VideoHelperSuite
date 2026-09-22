@@ -13,6 +13,16 @@ import folder_paths
 from comfy.utils import common_upscale, ProgressBar
 import nodes
 from comfy.k_diffusion.utils import FolderOfImages
+try:
+    # VideoFromFile is what lets LoadVideoUploadNative hand off ComfyUI's
+    # native VIDEO type without decoding to an IMAGE batch first. It lives in
+    # comfy_api.latest, which is newer than the comfy_api.v0_0_2 this repo
+    # otherwise relies on (see nodes.py) -- an older ComfyUI core won't have
+    # it. Guard so the whole VHS package still imports there; nodes.py only
+    # registers LoadVideoUploadNative when this succeeded.
+    from comfy_api.latest import VideoFromFile
+except ImportError:
+    VideoFromFile = None
 from .logger import logger
 from .utils import BIGMAX, DIMMAX, calculate_file_hash, get_sorted_dir_files_from_directory,\
         lazy_get_audio, hash_path, validate_path, strip_path, try_download_video,  \
@@ -462,6 +472,126 @@ class LoadVideoUpload:
     def load_video(self, **kwargs):
         kwargs['video'] = folder_paths.get_annotated_filepath(strip_path(kwargs['video']))
         return load_video(**kwargs)
+
+    @classmethod
+    def IS_CHANGED(s, video, **kwargs):
+        image_path = folder_paths.get_annotated_filepath(video)
+        return calculate_file_hash(image_path)
+
+    @classmethod
+    def VALIDATE_INPUTS(s, video):
+        if not folder_paths.exists_annotated_filepath(video):
+            return "Invalid video file: {}".format(video)
+        return True
+
+
+class LoadVideoUploadNative:
+    """
+    Select an uploaded video file and hand it off as ComfyUI's native VIDEO
+    type -- a lazy, file-backed handle (frames are streamed by whatever node
+    reads them, never fully decoded into a float32 IMAGE batch here) -- next
+    to the same VHS_VIDEOINFO metadata struct `Load Video (Upload)` produces,
+    so it drops straight into the existing `Video Info` unpack node.
+
+    For nodes that accept native VIDEO instead of IMAGE -- ComfyUI's own
+    Load Video/Save Video/Create Video, or third-party nodes (e.g. GVHMR
+    Inference) that specifically want to read frames from the file rather
+    than hold the whole clip as decoded tensors in RAM.
+
+    Deliberately drops the IMAGE-pipeline-only settings `Load Video (Upload)`
+    carries (force_rate, custom_width/height, frame_load_cap,
+    skip_first_frames, select_every_nth, format, vae, meta_batch): those all
+    exist to control eager frame decode/resize/batching, which this node
+    doesn't do. A downstream node that wants a trimmed or resampled VIDEO can
+    do so on the VIDEO object itself (e.g. core's Trim Video).
+
+    Requires comfy_api.latest.VideoFromFile (see the import at the top of
+    this file); on a ComfyUI core old enough not to have it, nodes.py leaves
+    this class out of NODE_CLASS_MAPPINGS entirely rather than registering a
+    node that would fail as soon as it ran.
+    """
+    # Read once at import time so nodes.py can decide whether to register
+    # this node at all -- checked here too (not just there) in case
+    # something ever instantiates the class directly.
+    VIDEO_TYPE_AVAILABLE = VideoFromFile is not None
+
+    @classmethod
+    def INPUT_TYPES(s):
+        input_dir = folder_paths.get_input_directory()
+        files = []
+        for f in os.listdir(input_dir):
+            if os.path.isfile(os.path.join(input_dir, f)):
+                file_parts = f.split('.')
+                if len(file_parts) > 1 and (file_parts[-1].lower() in video_extensions):
+                    files.append(f)
+        return {"required": {
+                    "video": (sorted(files),),
+                    },
+                }
+
+    CATEGORY = "Video Helper Suite 🎥🅥🅗🅢"
+
+    RETURN_TYPES = ("VIDEO", "VHS_VIDEOINFO")
+    RETURN_NAMES = ("VIDEO", "video_info")
+
+    FUNCTION = "load_video_native"
+
+    def load_video_native(self, video):
+        if VideoFromFile is None:
+            # Unreachable in normal operation -- nodes.py doesn't register
+            # this node when the import failed -- but kept as a clear error
+            # over a bare TypeError if something ever instantiates it anyway.
+            raise RuntimeError(
+                "Load Video Native requires a ComfyUI core with "
+                "comfy_api.latest.VideoFromFile (native VIDEO type support). "
+                "Update ComfyUI, or use Load Video (Upload) instead."
+            )
+        video_path = folder_paths.get_annotated_filepath(strip_path(video))
+        video_out = VideoFromFile(video_path)
+
+        # Header-only probe (no frame decode) for the VHS_VIDEOINFO struct --
+        # same cv2 properties `Load Video (Upload)`'s frame generator reads
+        # for its own metadata yield. source_* == loaded_* here: this node
+        # does no rate conversion, resizing, or frame trimming, so nothing
+        # was actually "loaded" differently from the source.
+        cap = cv2.VideoCapture(video_path)
+        if not cap.isOpened():
+            raise ValueError(f"{video_path} could not be opened with cv2 for metadata")
+        try:
+            fps = cap.get(cv2.CAP_PROP_FPS)
+            width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+            height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+            frame_count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+        finally:
+            cap.release()
+        duration = frame_count / fps if fps else 0
+
+        # Container-metadata duration (av, via the VIDEO object itself) --
+        # distinct from `duration` above (cv2 frame_count/fps, an estimate
+        # that can drift on variable-frame-rate video or containers with
+        # imprecise frame counts). Only this node -- the one that actually
+        # built a VideoFromFile -- can supply it; see _video_info_prefix_fields
+        # in nodes.py for the fallback loaders without one get. Identical for
+        # source and loaded here since this node does no rate conversion,
+        # resizing, or trimming.
+        duration_precise = video_out.get_duration()
+
+        video_info = {
+            "source_fps": fps,
+            "source_frame_count": frame_count,
+            "source_duration": duration,
+            "source_width": width,
+            "source_height": height,
+            "source_filename": os.path.splitext(os.path.basename(video_path))[0],
+            "source_duration_precise": duration_precise,
+            "loaded_fps": fps,
+            "loaded_frame_count": frame_count,
+            "loaded_duration": duration,
+            "loaded_width": width,
+            "loaded_height": height,
+            "loaded_duration_precise": duration_precise,
+        }
+        return (video_out, video_info)
 
     @classmethod
     def IS_CHANGED(s, video, **kwargs):

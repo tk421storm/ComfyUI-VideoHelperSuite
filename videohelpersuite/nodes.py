@@ -17,7 +17,7 @@ import functools
 import folder_paths
 from .logger import logger
 from .image_latent_nodes import *
-from .load_video_nodes import LoadVideoUpload, LoadVideoPath, LoadVideoFFmpegUpload, LoadVideoFFmpegPath, LoadImagePath
+from .load_video_nodes import LoadVideoUpload, LoadVideoUploadNative, LoadVideoPath, LoadVideoFFmpegUpload, LoadVideoFFmpegPath, LoadImagePath
 from .load_images_nodes import LoadImagesFromDirectoryUpload, LoadImagesFromDirectoryPath
 from .batched_nodes import VAEEncodeBatched, VAEDecodeBatched
 from .utils import ffmpeg_path, get_audio, hash_path, validate_path, requeue_workflow, \
@@ -877,6 +877,27 @@ class BatchManager:
         return (self,)
 
 
+def _video_info_prefix_fields(video_info, prefix):
+    """(fps, frame_count, duration, width, height, duration_precise) for `prefix` ('source' or 'loaded').
+
+    Shared by VideoInfo/VideoInfoSource/VideoInfoLoaded so the three stay in
+    sync instead of each re-deriving the same fields.
+
+    duration_precise is read from the video's own container metadata (via a
+    VIDEO object), rather than computed as frame_count/fps like `duration` --
+    the two usually agree, but frame_count/fps is only an estimate and can
+    drift on variable-frame-rate video or containers with an imprecise/absent
+    frame count. Only loaders that hand off a native VIDEO object (e.g. Load
+    Video Native) can supply it; other loaders fall back to the plain
+    `duration` estimate, since that's the best they have.
+    """
+    fps, frame_count, duration, width, height = (
+        video_info[f"{prefix}_{key}"] for key in ("fps", "frame_count", "duration", "width", "height")
+    )
+    duration_precise = video_info.get(f"{prefix}_duration_precise", duration)
+    return (fps, frame_count, duration, width, height, duration_precise)
+
+
 class VideoInfo:
     @classmethod
     def INPUT_TYPES(s):
@@ -888,7 +909,7 @@ class VideoInfo:
 
     CATEGORY = "Video Helper Suite 🎥🅥🅗🅢"
 
-    RETURN_TYPES = ("FLOAT","INT", "FLOAT", "INT", "INT", "STRING", "FLOAT","INT", "FLOAT", "INT", "INT")
+    RETURN_TYPES = ("FLOAT","INT", "FLOAT", "INT", "INT", "STRING", "FLOAT","INT", "FLOAT", "INT", "INT", "FLOAT", "FLOAT")
     RETURN_NAMES = (
         "source_fps🟨",
         "source_frame_count🟨",
@@ -901,20 +922,22 @@ class VideoInfo:
         "loaded_duration🟦",
         "loaded_width🟦",
         "loaded_height🟦",
+        "source_duration_precise🟨",
+        "loaded_duration_precise🟦",
     )
     FUNCTION = "get_video_info"
 
     def get_video_info(self, video_info):
-        keys = ["fps", "frame_count", "duration", "width", "height"]
+        source_fps, source_frame_count, source_duration, source_width, source_height, source_duration_precise = \
+            _video_info_prefix_fields(video_info, "source")
+        loaded_fps, loaded_frame_count, loaded_duration, loaded_width, loaded_height, loaded_duration_precise = \
+            _video_info_prefix_fields(video_info, "loaded")
 
-        source_info = []
-        loaded_info = []
-
-        for key in keys:
-            source_info.append(video_info[f"source_{key}"])
-            loaded_info.append(video_info[f"loaded_{key}"])
-
-        return (*source_info, video_info["source_filename"], *loaded_info)
+        return (
+            source_fps, source_frame_count, source_duration, source_width, source_height, video_info["source_filename"],
+            loaded_fps, loaded_frame_count, loaded_duration, loaded_width, loaded_height,
+            source_duration_precise, loaded_duration_precise,
+        )
 
 
 class VideoInfoSource:
@@ -928,7 +951,7 @@ class VideoInfoSource:
 
     CATEGORY = "Video Helper Suite 🎥🅥🅗🅢"
 
-    RETURN_TYPES = ("FLOAT","INT", "FLOAT", "INT", "INT", "STRING",)
+    RETURN_TYPES = ("FLOAT","INT", "FLOAT", "INT", "INT", "STRING", "FLOAT")
     RETURN_NAMES = (
         "fps🟨",
         "frame_count🟨",
@@ -936,18 +959,14 @@ class VideoInfoSource:
         "width🟨",
         "height🟨",
         "filename🟨",
+        "duration_precise🟨",
     )
     FUNCTION = "get_video_info"
 
     def get_video_info(self, video_info):
-        keys = ["fps", "frame_count", "duration", "width", "height"]
-
-        source_info = []
-
-        for key in keys:
-            source_info.append(video_info[f"source_{key}"])
-
-        return (*source_info, video_info["source_filename"])
+        fps, frame_count, duration, width, height, duration_precise = \
+            _video_info_prefix_fields(video_info, "source")
+        return (fps, frame_count, duration, width, height, video_info["source_filename"], duration_precise)
 
 
 class VideoInfoLoaded:
@@ -961,25 +980,19 @@ class VideoInfoLoaded:
 
     CATEGORY = "Video Helper Suite 🎥🅥🅗🅢"
 
-    RETURN_TYPES = ("FLOAT","INT", "FLOAT", "INT", "INT",)
+    RETURN_TYPES = ("FLOAT","INT", "FLOAT", "INT", "INT", "FLOAT")
     RETURN_NAMES = (
         "fps🟦",
         "frame_count🟦",
         "duration🟦",
         "width🟦",
         "height🟦",
+        "duration_precise🟦",
     )
     FUNCTION = "get_video_info"
 
     def get_video_info(self, video_info):
-        keys = ["fps", "frame_count", "duration", "width", "height"]
-
-        loaded_info = []
-
-        for key in keys:
-            loaded_info.append(video_info[f"loaded_{key}"])
-
-        return (*loaded_info,)
+        return _video_info_prefix_fields(video_info, "loaded")
 
 class SelectFilename:
     @classmethod
@@ -1041,6 +1054,7 @@ class SelectLatest:
 NODE_CLASS_MAPPINGS = {
     "VHS_VideoCombine": VideoCombine,
     "VHS_LoadVideo": LoadVideoUpload,
+    "VHS_LoadVideoNative": LoadVideoUploadNative,
     "VHS_LoadVideoPath": LoadVideoPath,
     "VHS_LoadVideoFFmpeg": LoadVideoFFmpegUpload,
     "VHS_LoadVideoFFmpegPath": LoadVideoFFmpegPath,
@@ -1085,6 +1099,7 @@ NODE_CLASS_MAPPINGS = {
 NODE_DISPLAY_NAME_MAPPINGS = {
     "VHS_VideoCombine": "Video Combine 🎥🅥🅗🅢",
     "VHS_LoadVideo": "Load Video (Upload) 🎥🅥🅗🅢",
+    "VHS_LoadVideoNative": "Load Video Native (Upload) 🎥🅥🅗🅢",
     "VHS_LoadVideoPath": "Load Video (Path) 🎥🅥🅗🅢",
     "VHS_LoadVideoFFmpeg": "Load Video FFmpeg (Upload) 🎥🅥🅗🅢",
     "VHS_LoadVideoFFmpegPath": "Load Video FFmpeg (Path) 🎥🅥🅗🅢",
@@ -1126,3 +1141,11 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "VHS_Unbatch":  "Unbatch 🎥🅥🅗🅢",
     "VHS_SelectLatest": "Select Latest 🎥🅥🅗🅢",
 }
+
+if not LoadVideoUploadNative.VIDEO_TYPE_AVAILABLE:
+    # comfy_api.latest.VideoFromFile isn't available on this ComfyUI core
+    # (see the try/except around its import in load_video_nodes.py) --
+    # drop the node rather than register one that would fail as soon as
+    # someone ran it.
+    del NODE_CLASS_MAPPINGS["VHS_LoadVideoNative"]
+    del NODE_DISPLAY_NAME_MAPPINGS["VHS_LoadVideoNative"]

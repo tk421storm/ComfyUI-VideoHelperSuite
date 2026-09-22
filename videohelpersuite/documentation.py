@@ -31,6 +31,18 @@ def format_type(desc, lower, lowers=None, upper=None, uppers=None, cap=None):
         uppers = lowers.upper()
     return format_each(desc, lower=lower, lowers=lowers, upper=upper, uppers=uppers, cap=cap)
 
+# Shared across VHS_VideoInfo/VHS_VideoInfoSource/VHS_VideoInfoLoaded's
+# duration_precise outputs so the three descriptions stay in sync; see
+# nodes.py's _video_info_prefix_fields for the actual field it documents.
+_DURATION_PRECISE_DESC = (
+    "The video's duration read directly from its container metadata, rather "
+    "than computed as frame_count/fps. The two usually agree, but "
+    "frame_count/fps is only an estimate -- it can drift on variable-frame-rate "
+    "video or containers with an imprecise/absent frame count. Only loaders "
+    "that hand off a native VIDEO object (e.g. Load Video Native) can supply "
+    "{precise}; other loaders fall back to the same value as {estimate}."
+)
+
 common_descriptions = {
   'merge_strategy': [
       'Determines what the output resolution will be if input resolutions don\'t match',
@@ -132,6 +144,17 @@ descriptions = {
          'format': 'Updates other widgets so that only values supported by the given format can be entered and provides recommended defaults.',
          'choose video to upload': 'An upload button is provided to upload local files to the input folder',
          'videopreview': 'Displays a preview for the selected video input. If advanced previews is enabled, this preview will reflect the frame_load_cap, force_rate, skip_first_frames, and select_every_nth values chosen. If the video has audio, it will also be previewed when moused over. Additional preview options can be accessed with right click.',
+         }
+        }],
+  'VHS_LoadVideoNative': ['Load Video Native (Upload) 🎥🅥🅗🅢', short_desc("Hands off an uploaded video as ComfyUI's native VIDEO type instead of a decoded IMAGE batch"),
+    "Frames are streamed lazily by whatever node reads them (e.g. by ffmpeg/pyav), rather than being decoded into a float32 IMAGE tensor here. Use this instead of Load Video (Upload) when the downstream node accepts VIDEO -- ComfyUI's own Load Video/Save Video/Create Video, or third-party nodes that specifically read frames from the file to avoid holding the whole clip in RAM. Drops the IMAGE-pipeline-only widgets (force_rate, custom_width/height, frame_load_cap, skip_first_frames, select_every_nth, format, vae, meta_batch) since this node does no eager decode, resize, or batching for them to control -- trim or resample the VIDEO output itself if you need that (e.g. core's Trim Video).",
+    {'Outputs': {
+         'VIDEO': 'The video, as a native VIDEO handle backed by the uploaded file',
+         'video_info': 'Exposes the same fields as Load Video (Upload) -- source and loaded are identical here, since this node performs no rate conversion, resizing, or trimming -- plus duration_precise, a container-metadata-based duration (see Video Info)',
+         },
+     'Widgets': {
+         'video': 'The video file to be loaded. Lists all files with a video extension in the ComfyUI/Input folder',
+         'choose video to upload': 'An upload button is provided to upload local files to the input folder',
          }
         }],
   'VHS_LoadVideoFFmpeg': ['Load Video FFmpeg 🎥🅥🅗🅢', short_desc('Loads a video from the input folder using ffmpeg instead of opencv'),
@@ -344,6 +367,8 @@ descriptions = {
          'loaded_duration🟦': 'The duration in seconds of returned images after accounting for frame_load_cap',
          'loaded_width🟦': 'The width of the video after scaling. These coordinates are in image space even if loading to latent space',
          'loaded_height🟦': 'The height of the video after scaling. These coordinates are in image space even if loading to latent space',
+         'source_duration_precise🟨': _DURATION_PRECISE_DESC.format(precise='source_duration_precise🟨', estimate='source_duration🟨'),
+         'loaded_duration_precise🟦': _DURATION_PRECISE_DESC.format(precise='loaded_duration_precise🟦', estimate='loaded_duration🟦'),
          },
         }],
   "VHS_VideoInfoSource": ['Video Info Source 🎥🅥🅗🅢', short_desc('Splits information on a video into a numerous outputs describing the file itself without accounting for load options'),
@@ -356,6 +381,7 @@ descriptions = {
          'source_duration🟨': 'The length of images just returned in seconds',
          'source_width🟨': 'The original width',
          'source_height🟨': 'The original height',
+         'duration_precise🟨': _DURATION_PRECISE_DESC.format(precise='duration_precise🟨', estimate='duration🟨'),
          }
      }],
   "VHS_VideoInfoLoaded": ['Video Info Loaded 🎥🅥🅗🅢', short_desc('Splits information on a video into a numerous outputs describing the file itself after accounting for load options'),
@@ -368,6 +394,7 @@ descriptions = {
          'loaded_duration🟦': 'The duration in seconds of returned images after accounting for frame_load_cap',
          'loaded_width🟦': 'The width of the video after scaling. This is the dimension of the corresponding image even if loading as a latent directly',
          'loaded_height🟦': 'The height of the video after scaling. This is the dimension of the corresponding image even if loading as a latent directly',
+         'duration_precise🟦': _DURATION_PRECISE_DESC.format(precise='duration_precise🟦', estimate='duration🟦'),
          }
      }],
   "VHS_SelectFilename": ['VAE Select Filename 🎥🅥🅗🅢', short_desc('Select a single filename from the VHS_FILENAMES output by a Video Combine and return it as a string'),
