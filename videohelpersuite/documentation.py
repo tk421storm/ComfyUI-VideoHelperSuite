@@ -147,14 +147,22 @@ descriptions = {
          }
         }],
   'VHS_LoadVideoNative': ['Load Video Native (Upload) 🎥🅥🅗🅢', short_desc("Hands off an uploaded video as ComfyUI's native VIDEO type instead of a decoded IMAGE batch"),
-    "Frames are streamed lazily by whatever node reads them (e.g. by ffmpeg/pyav), rather than being decoded into a float32 IMAGE tensor here. Use this instead of Load Video (Upload) when the downstream node accepts VIDEO -- ComfyUI's own Load Video/Save Video/Create Video, or third-party nodes that specifically read frames from the file to avoid holding the whole clip in RAM. Drops the IMAGE-pipeline-only widgets (force_rate, custom_width/height, frame_load_cap, skip_first_frames, select_every_nth, format, vae, meta_batch) since this node does no eager decode, resize, or batching for them to control -- trim or resample the VIDEO output itself if you need that (e.g. core's Trim Video).",
+    "Frames are streamed lazily by whatever node reads them (e.g. by ffmpeg/pyav), rather than being decoded into a float32 IMAGE tensor here. Use this instead of Load Video (Upload) when the downstream node accepts VIDEO -- ComfyUI's own Load Video/Save Video/Create Video, or third-party nodes that specifically read frames from the file to avoid holding the whole clip in RAM. Takes the same widgets as Load Video (Upload) except vae and meta_batch. skip_first_frames and frame_load_cap alone trim the file lazily; force_rate, select_every_nth, or a resize re-encode the selected frames with ffmpeg into the temp folder.",
     {'Outputs': {
-         'VIDEO': 'The video, as a native VIDEO handle backed by the uploaded file',
-         'video_info': 'Exposes the same fields as Load Video (Upload) -- source and loaded are identical here, since this node performs no rate conversion, resizing, or trimming -- plus duration_precise, a container-metadata-based duration (see Video Info)',
+         'VIDEO': 'The video, as a native VIDEO handle backed by the uploaded file (or the re-encoded temp file)',
+         'video_info': 'Exposes the same fields as Load Video (Upload), plus duration_precise, a container-metadata-based duration (see Video Info)',
          },
      'Widgets': {
          'video': 'The video file to be loaded. Lists all files with a video extension in the ComfyUI/Input folder',
+         'force_rate': 'Drops or duplicates frames so that the produced output has the target frame rate. If set to 0, the source rate is kept. Requires a re-encode.',
+         'custom_width': 'Allows for an arbitrary width to be entered, cropping to maintain aspect ratio if both are set. Requires a re-encode.',
+         'custom_height': 'Allows for an arbitrary height to be entered, cropping to maintain aspect ratio if both are set. Requires a re-encode.',
+         'frame_load_cap': 'The maximum number of frames to load. If 0, all frames are loaded.',
+         'skip_first_frames': 'A number of frames which are discarded before producing output.',
+         'select_every_nth': 'Keeps only the first of every n frames and discard the rest. Applies after force_rate. Requires a re-encode.',
+         'format': 'Updates other widgets so that only values supported by the given format can be entered and provides recommended defaults.',
          'choose video to upload': 'An upload button is provided to upload local files to the input folder',
+         'videopreview': 'Displays a preview for the selected video input. If advanced previews is enabled, this preview will reflect the frame_load_cap, force_rate, skip_first_frames, and select_every_nth values chosen.',
          }
         }],
   'VHS_LoadVideoFFmpeg': ['Load Video FFmpeg 🎥🅥🅗🅢', short_desc('Loads a video from the input folder using ffmpeg instead of opencv'),

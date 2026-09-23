@@ -134,7 +134,7 @@ function useKVState(nodeType) {
                                 initialValue = inputs.optional[w.name][0][0];
                             }
                         }
-                        if (initialValue) {
+                        if (initialValue !== null) {
                             w.value = initialValue;
                             w.callback?.(w.value)
                         }
@@ -1938,7 +1938,8 @@ app.registerExtension({
                 });
             });
             addLoadCommon(nodeType, nodeData);
-        } else if (nodeData?.name == "VHS_LoadVideo" || nodeData?.name == "VHS_LoadVideoFFmpeg") {
+        } else if (nodeData?.name == "VHS_LoadVideo" || nodeData?.name == "VHS_LoadVideoFFmpeg"
+                   || nodeData?.name == "VHS_LoadVideoNative") {
             chainCallback(nodeType.prototype, "onNodeCreated", function() {
                 const pathWidget = this.widgets.find((w) => w.name === "video");
                 chainCallback(pathWidget, "callback", (value) => {
@@ -1959,7 +1960,9 @@ app.registerExtension({
             });
             addUploadWidget(nodeType, nodeData, "video");
             addLoadCommon(nodeType, nodeData);
-            addVAEOutputToggle(nodeType, nodeData);
+            if (nodeData?.name != "VHS_LoadVideoNative") {
+                addVAEOutputToggle(nodeType, nodeData);
+            }
         } else if (nodeData?.name == "VHS_LoadAudio") {
             addAudioPreview(nodeType)
             chainCallback(nodeType.prototype, "onNodeCreated", function() {

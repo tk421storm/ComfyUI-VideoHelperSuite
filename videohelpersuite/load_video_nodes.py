@@ -8,6 +8,7 @@ import psutil
 import subprocess
 import re
 import time
+import hashlib
 
 import folder_paths
 from comfy.utils import common_upscale, ProgressBar
@@ -498,12 +499,11 @@ class LoadVideoUploadNative:
     Inference) that specifically want to read frames from the file rather
     than hold the whole clip as decoded tensors in RAM.
 
-    Deliberately drops the IMAGE-pipeline-only settings `Load Video (Upload)`
-    carries (force_rate, custom_width/height, frame_load_cap,
-    skip_first_frames, select_every_nth, format, vae, meta_batch): those all
-    exist to control eager frame decode/resize/batching, which this node
-    doesn't do. A downstream node that wants a trimmed or resampled VIDEO can
-    do so on the VIDEO object itself (e.g. core's Trim Video).
+    Takes the same widgets as `Load Video (Upload)` minus vae/meta_batch,
+    which only apply to an IMAGE batch. A plain trim (skip_first_frames /
+    frame_load_cap) stays lazy through VideoFromFile's start_time/duration;
+    force_rate, select_every_nth or a resize re-encode the selection with
+    ffmpeg into the temp directory, and that file is handed off instead.
 
     Requires comfy_api.latest.VideoFromFile (see the import at the top of
     this file); on a ComfyUI core old enough not to have it, nodes.py leaves
@@ -526,7 +526,16 @@ class LoadVideoUploadNative:
                     files.append(f)
         return {"required": {
                     "video": (sorted(files),),
+                    "force_rate": (floatOrInt, {"default": 0, "min": 0, "max": 60, "step": 1, "disable": 0}),
+                    "custom_width": ("INT", {"default": 0, "min": 0, "max": DIMMAX, 'disable': 0}),
+                    "custom_height": ("INT", {"default": 0, "min": 0, "max": DIMMAX, 'disable': 0}),
+                    "frame_load_cap": ("INT", {"default": 0, "min": 0, "max": BIGMAX, "step": 1, "disable": 0}),
+                    "skip_first_frames": ("INT", {"default": 0, "min": 0, "max": BIGMAX, "step": 1}),
+                    "select_every_nth": ("INT", {"default": 1, "min": 1, "max": BIGMAX, "step": 1}),
                     },
+                "optional": {
+                     "format": get_load_formats(),
+                },
                 }
 
     CATEGORY = "Video Helper Suite 🎥🅥🅗🅢"
@@ -536,7 +545,8 @@ class LoadVideoUploadNative:
 
     FUNCTION = "load_video_native"
 
-    def load_video_native(self, video):
+    def load_video_native(self, video, force_rate, custom_width, custom_height,
+                          frame_load_cap, skip_first_frames, select_every_nth, format='None'):
         if VideoFromFile is None:
             # Unreachable in normal operation -- nodes.py doesn't register
             # this node when the import failed -- but kept as a clear error
@@ -547,13 +557,11 @@ class LoadVideoUploadNative:
                 "Update ComfyUI, or use Load Video (Upload) instead."
             )
         video_path = folder_paths.get_annotated_filepath(strip_path(video))
-        video_out = VideoFromFile(video_path)
+        format = get_format(format)
 
         # Header-only probe (no frame decode) for the VHS_VIDEOINFO struct --
         # same cv2 properties `Load Video (Upload)`'s frame generator reads
-        # for its own metadata yield. source_* == loaded_* here: this node
-        # does no rate conversion, resizing, or frame trimming, so nothing
-        # was actually "loaded" differently from the source.
+        # for its own metadata yield.
         cap = cv2.VideoCapture(video_path)
         if not cap.isOpened():
             raise ValueError(f"{video_path} could not be opened with cv2 for metadata")
@@ -566,15 +574,63 @@ class LoadVideoUploadNative:
             cap.release()
         duration = frame_count / fps if fps else 0
 
-        # Container-metadata duration (av, via the VIDEO object itself) --
-        # distinct from `duration` above (cv2 frame_count/fps, an estimate
-        # that can drift on variable-frame-rate video or containers with
-        # imprecise frame counts). Only this node -- the one that actually
-        # built a VideoFromFile -- can supply it; see _video_info_prefix_fields
-        # in nodes.py for the fallback loaders without one get. Identical for
-        # source and loaded here since this node does no rate conversion,
-        # resizing, or trimming.
-        duration_precise = video_out.get_duration()
+        # Container-metadata duration (av) -- distinct from `duration` above
+        # (cv2 frame_count/fps, an estimate that can drift on variable-frame-rate
+        # video or containers with imprecise frame counts). Only this node --
+        # the one that actually builds a VideoFromFile -- can supply it; see
+        # _video_info_prefix_fields in nodes.py for the fallback other loaders get.
+        duration_precise = VideoFromFile(video_path).get_duration()
+
+        # Same selection order as cv_frame_generator + load_video: resample
+        # to force_rate, skip, keep every nth, cap, then fit the format's
+        # frame count constraint. Counted from duration_precise since nothing
+        # is decoded here to count real frames.
+        rate = force_rate or fps
+        loaded_count = len(range(skip_first_frames, round(duration_precise * rate), select_every_nth))
+        if frame_load_cap > 0:
+            loaded_count = min(loaded_count, frame_load_cap)
+        if 'frames' in format and loaded_count % format['frames'][0] != format['frames'][1]:
+            if len(format['frames']) > 2 and format['frames'][2]:
+                raise RuntimeError(f"The number of frames loaded {loaded_count}, does not match the requirements of the currently selected format.")
+            div, mod = format['frames'][:2]
+            loaded_count = (loaded_count - mod) // div * div + mod
+        if loaded_count <= 0:
+            raise RuntimeError("No frames generated")
+        loaded_fps = rate / select_every_nth
+        loaded_duration = loaded_count / loaded_fps
+        start_time = skip_first_frames / rate
+        new_width, new_height = target_size(width, height, custom_width, custom_height,
+                                            format.get('dim', (1,))[0])
+
+        if force_rate == 0 and select_every_nth == 1 and (new_width, new_height) == (width, height):
+            video_out = VideoFromFile(video_path, start_time=start_time, duration=loaded_duration)
+        else:
+            vfilters = []
+            if force_rate != 0:
+                vfilters.append(f"fps=fps={force_rate}")
+            if select_every_nth > 1:
+                vfilters.append(f"select=not(mod(n\\,{select_every_nth})),setpts=N/({loaded_fps})/TB")
+            if (new_width, new_height) != (width, height):
+                ar = new_width / new_height
+                if abs(width * ar - height) >= 1:
+                    #Aspect ratio is changed. Crop to new aspect ratio before scale
+                    vfilters.append(f"crop=if(gt({ar}\\,a)\\,iw\\,ih*{ar}):if(gt({ar}\\,a)\\,iw/{ar}\\,ih)")
+                vfilters.append(f"scale={new_width}:{new_height}")
+            key = f"{calculate_file_hash(video_path)}{start_time}{loaded_count}{vfilters}"
+            out_path = os.path.join(folder_paths.get_temp_directory(),
+                                    f"vhs_native_{hashlib.sha256(key.encode()).hexdigest()[:16]}.mp4")
+            if not os.path.exists(out_path):
+                os.makedirs(folder_paths.get_temp_directory(), exist_ok=True)
+                args = [ffmpeg_path, "-v", "error", "-y", "-ss", str(start_time), "-i", video_path,
+                        "-vf", ",".join(vfilters), "-r", str(loaded_fps),
+                        "-frames:v", str(loaded_count), "-t", str(loaded_duration),
+                        "-c:v", "libx264", "-crf", "16", "-c:a", "aac", out_path]
+                try:
+                    subprocess.run(args, stderr=subprocess.PIPE, check=True)
+                except subprocess.CalledProcessError as e:
+                    raise Exception("An error occurred in the ffmpeg subprocess:\n" \
+                            + e.stderr.decode(*ENCODE_ARGS))
+            video_out = VideoFromFile(out_path)
 
         video_info = {
             "source_fps": fps,
@@ -584,12 +640,12 @@ class LoadVideoUploadNative:
             "source_height": height,
             "source_filename": os.path.splitext(os.path.basename(video_path))[0],
             "source_duration_precise": duration_precise,
-            "loaded_fps": fps,
-            "loaded_frame_count": frame_count,
-            "loaded_duration": duration,
-            "loaded_width": width,
-            "loaded_height": height,
-            "loaded_duration_precise": duration_precise,
+            "loaded_fps": loaded_fps,
+            "loaded_frame_count": loaded_count,
+            "loaded_duration": loaded_duration,
+            "loaded_width": new_width,
+            "loaded_height": new_height,
+            "loaded_duration_precise": video_out.get_duration(),
         }
         return (video_out, video_info)
 
